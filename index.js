@@ -40,6 +40,7 @@ async function createVideo(imagePath, audioPath) {
     return new Promise((resolve, reject) => {
         ffmpeg()
             .input(imagePath)
+            .loop()
             .input(audioPath)
             .outputOptions([
                 '-c:v libx264',
@@ -49,7 +50,7 @@ async function createVideo(imagePath, audioPath) {
                 '-pix_fmt yuv420p',
                 '-shortest'
             ])
-            .save(outputPath)
+            .output(outputPath)
             .on('end', () => {
                 console.log(`Video created: ${outputPath}`);
                 resolve(outputPath);
@@ -57,7 +58,8 @@ async function createVideo(imagePath, audioPath) {
             .on('error', (err) => {
                 console.error('Error creating video:', err);
                 reject(err);
-            });
+            })
+            .run();
     });
 }
 
