@@ -1,3 +1,5 @@
 recordings
 node_modules
 *.swp
+videos_generated
+images
