@@ -1,0 +1,7 @@
+recordings
+node_modules
+*.swp
+videos_generated
+images
+processed_recordings
+inactive_images
