@@ -4,7 +4,7 @@ import time
 import threading
 
 # === CONFIG ===
-MP3_PATH = "voice.mp3"
+MP3_PATH = "voice.m4a"
 WINDOW_SIZE = (400, 400)
 FRAME_DURATION_MS = 100  # how often to update mouth
 IMAGE_PATHS = {
