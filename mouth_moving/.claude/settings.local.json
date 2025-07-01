@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(npm rebuild:*)",
+      "Bash(sudo apt:*)",
+      "Bash(sudo apt install:*)"
+    ],
+    "deny": []
+  }
+}
