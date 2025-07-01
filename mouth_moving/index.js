@@ -51,15 +51,16 @@ function getVolume(audioPath, time, callback) {
  * Create a single frame with the appropriate mouth image.
  */
 async function createFrame(mouthState, frameNumber) {
-    const canvas = createCanvas(400, 400);
+    const canvas = createCanvas(512, 1024);
     const ctx = canvas.getContext('2d');
 
     // White background
     ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, 400, 400);
+    ctx.fillRect(0, 0, 512, 1024);
 
     const mouthImage = await loadImage(MOUTH_IMAGES[mouthState]);
-    ctx.drawImage(mouthImage, 100, 100);
+    // Draw image at full size since canvas matches image dimensions
+    ctx.drawImage(mouthImage, 0, 0);
 
     const framePath = path.join(TEMP_DIR, `frame-${String(frameNumber).padStart(5, '0')}.png`);
     const out = fs.createWriteStream(framePath);
