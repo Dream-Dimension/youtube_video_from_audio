@@ -2,9 +2,13 @@ const ffmpeg = require('fluent-ffmpeg');
 const { createCanvas, loadImage } = require('canvas');
 const fs = require('fs');
 const path = require('path');
+const log = require('loglevel');
+
+// Set log level (trace, debug, info, warn, error)
+log.setLevel('info');
 
 // --- CONFIGURATION ---
-const AUDIO_PATH = 'voice.m4a';
+const AUDIO_PATH = 'shortvoice.m4a';
 const IMAGE_DIR = './';
 const MOUTH_IMAGES = {
     closed: path.join(IMAGE_DIR, 'mouth_closed.png'),
@@ -17,8 +21,16 @@ const FINAL_VIDEO = 'final_video.mp4';
 const TEMP_DIR = './temp_frames';
 
 // --- SETUP ---
+log.info('🎬 Starting mouth animation video generator');
+log.info(`📁 Using audio file: ${AUDIO_PATH}`);
+log.info(`🖼️  Using mouth images: ${Object.keys(MOUTH_IMAGES).join(', ')}`);
+log.info(`⚙️  Frame rate: ${FRAME_RATE} fps`);
+
 if (!fs.existsSync(TEMP_DIR)) {
+    log.info(`📂 Creating temporary directory: ${TEMP_DIR}`);
     fs.mkdirSync(TEMP_DIR);
+} else {
+    log.info(`📂 Using existing temporary directory: ${TEMP_DIR}`);
 }
 
 // --- FUNCTIONS ---
@@ -29,6 +41,7 @@ if (!fs.existsSync(TEMP_DIR)) {
  * sophisticated audio processing library.
  */
 function getVolume(audioPath, time, callback) {
+    log.debug(`🔊 Analyzing audio volume at ${time.toFixed(2)}s`);
     ffmpeg(audioPath)
         .setStartTime(time)
         .setDuration(1 / FRAME_RATE)
@@ -38,10 +51,13 @@ function getVolume(audioPath, time, callback) {
         .on('stderr', (stderrLine) => {
             const volumeMatch = stderrLine.match(/mean_volume: ([-.0-9]+) dB/);
             if (volumeMatch) {
-                callback(null, parseFloat(volumeMatch[1]));
+                const volume = parseFloat(volumeMatch[1]);
+                log.debug(`📊 Volume at ${time.toFixed(2)}s: ${volume}dB`);
+                callback(null, volume);
             }
         })
         .on('error', (err) => {
+            log.error(`❌ Error getting volume at ${time.toFixed(2)}s:`, err.message);
             callback(err);
         })
         .run();
@@ -51,6 +67,7 @@ function getVolume(audioPath, time, callback) {
  * Create a single frame with the appropriate mouth image.
  */
 async function createFrame(mouthState, frameNumber) {
+    log.debug(`🎨 Creating frame ${frameNumber} with mouth state: ${mouthState}`);
     const canvas = createCanvas(512, 1024);
     const ctx = canvas.getContext('2d');
 
@@ -67,23 +84,31 @@ async function createFrame(mouthState, frameNumber) {
     const stream = canvas.createPNGStream();
     stream.pipe(out);
     await new Promise((resolve) => out.on('finish', resolve));
+    log.debug(`✅ Frame ${frameNumber} saved: ${framePath}`);
     return framePath;
 }
 
 // --- MAIN LOGIC ---
 
 async function main() {
-    console.log('Analyzing audio...');
+    log.info('🎵 Analyzing audio file...');
 
     const audioDuration = await new Promise((resolve, reject) => {
         ffmpeg.ffprobe(AUDIO_PATH, (err, metadata) => {
-            if (err) return reject(err);
+            if (err) {
+                log.error(`❌ Error reading audio file: ${err.message}`);
+                return reject(err);
+            }
             resolve(metadata.format.duration);
         });
     });
 
+    log.info(`⏱️  Audio duration: ${audioDuration.toFixed(2)} seconds`);
     const frameCount = Math.floor(audioDuration * FRAME_RATE);
+    log.info(`🎞️  Total frames to generate: ${frameCount}`);
+    
     const framePromises = [];
+    let processedFrames = 0;
 
     for (let i = 0; i < frameCount; i++) {
         const time = i / FRAME_RATE;
@@ -99,15 +124,24 @@ async function main() {
                         mouthState = 'open';
                     }
 
-                    createFrame(mouthState, i).then(resolve).catch(reject);
+                    log.debug(`👄 Frame ${i}: ${mouthState} (volume: ${volume}dB)`);
+                    createFrame(mouthState, i).then(() => {
+                        processedFrames++;
+                        if (processedFrames % 10 === 0 || processedFrames === frameCount) {
+                            const progress = ((processedFrames / frameCount) * 100).toFixed(1);
+                            log.info(`📈 Progress: ${processedFrames}/${frameCount} frames (${progress}%)`);
+                        }
+                        resolve();
+                    }).catch(reject);
                 });
             })
         );
     }
 
     await Promise.all(framePromises);
+    log.info('✅ All frames generated successfully!');
 
-    console.log('Creating video from frames...');
+    log.info('🎥 Creating video from frames...');
 
     await new Promise((resolve, reject) => {
         ffmpeg(path.join(TEMP_DIR, 'frame-%05d.png'))
@@ -115,28 +149,56 @@ async function main() {
             .videoCodec('libx264')
             .outputOptions('-pix_fmt', 'yuv420p')
             .output(OUTPUT_VIDEO)
-            .on('end', resolve)
-            .on('error', reject)
+            .on('progress', (progress) => {
+                if (progress.percent) {
+                    log.info(`🎬 Video encoding progress: ${progress.percent.toFixed(1)}%`);
+                }
+            })
+            .on('end', () => {
+                log.info(`✅ Video created: ${OUTPUT_VIDEO}`);
+                resolve();
+            })
+            .on('error', (err) => {
+                log.error(`❌ Error creating video: ${err.message}`);
+                reject(err);
+            })
             .run();
     });
 
-    console.log('Combining video and audio...');
+    log.info('🔗 Combining video and audio...');
 
     await new Promise((resolve, reject) => {
         ffmpeg(OUTPUT_VIDEO)
             .input(AUDIO_PATH)
             .outputOptions(['-c:v', 'copy', '-c:a', 'aac'])
             .output(FINAL_VIDEO)
-            .on('end', resolve)
-            .on('error', reject)
+            .on('progress', (progress) => {
+                if (progress.percent) {
+                    log.info(`🎵 Audio/video sync progress: ${progress.percent.toFixed(1)}%`);
+                }
+            })
+            .on('end', () => {
+                log.info(`✅ Final video created: ${FINAL_VIDEO}`);
+                resolve();
+            })
+            .on('error', (err) => {
+                log.error(`❌ Error combining audio/video: ${err.message}`);
+                reject(err);
+            })
             .run();
     });
 
-    console.log('Cleaning up temporary files...');
+    log.info('🧹 Cleaning up temporary files...');
     fs.rmSync(TEMP_DIR, { recursive: true, force: true });
     fs.unlinkSync(OUTPUT_VIDEO);
+    log.info(`🗑️  Removed temporary files: ${TEMP_DIR}, ${OUTPUT_VIDEO}`);
 
-    console.log(`\nDone! Final video saved to ${FINAL_VIDEO}`);
+    log.info('🎉 Video generation complete!');
+    log.info(`📹 Final video saved to: ${FINAL_VIDEO}`);
+    log.info(`📊 Video stats: ${frameCount} frames, ${audioDuration.toFixed(2)}s duration, ${FRAME_RATE} fps`);
 }
 
-main().catch(console.error);
+main().catch((error) => {
+    log.error('💥 Fatal error:', error.message);
+    process.exit(1);
+});
