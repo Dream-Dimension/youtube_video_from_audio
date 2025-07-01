@@ -8,7 +8,7 @@ const log = require('loglevel');
 log.setLevel('info');
 
 // --- CONFIGURATION ---
-const AUDIO_PATH = 'shortvoice.m4a';
+const AUDIO_PATH = 'longvoice.m4a';
 const IMAGE_DIR = './';
 const MOUTH_IMAGES = {
     closed: path.join(IMAGE_DIR, 'mouth_closed.png'),
@@ -19,6 +19,14 @@ const FRAME_RATE = 10; // Frames per second
 const OUTPUT_VIDEO = 'output.mp4';
 const FINAL_VIDEO = 'final_video.mp4';
 const TEMP_DIR = './temp_frames';
+
+// Performance settings for different clip lengths
+const PERFORMANCE_CONFIG = {
+    BATCH_SIZE: 50,           // Frames per batch (reduces memory usage)
+    VOLUME_TIMEOUT: 10000,    // Timeout for volume detection (ms)
+    ENABLE_GC: true,          // Enable garbage collection for long clips
+    LONG_CLIP_THRESHOLD: 120  // Seconds - consider "long" for optimization
+};
 
 // --- SETUP ---
 log.info('🎬 Starting mouth animation video generator');
@@ -42,6 +50,17 @@ if (!fs.existsSync(TEMP_DIR)) {
  */
 function getVolume(audioPath, time, callback) {
     log.debug(`🔊 Analyzing audio volume at ${time.toFixed(2)}s`);
+    let resolved = false;
+    
+    // Add timeout for volume detection to prevent hanging
+    const timeout = setTimeout(() => {
+        if (!resolved) {
+            resolved = true;
+            log.warn(`⚠️ Volume detection timeout at ${time.toFixed(2)}s, using default volume`);
+            callback(null, -50); // Default to quiet volume
+        }
+    }, PERFORMANCE_CONFIG.VOLUME_TIMEOUT);
+    
     ffmpeg(audioPath)
         .setStartTime(time)
         .setDuration(1 / FRAME_RATE)
@@ -50,15 +69,21 @@ function getVolume(audioPath, time, callback) {
         .output('/dev/null')
         .on('stderr', (stderrLine) => {
             const volumeMatch = stderrLine.match(/mean_volume: ([-.0-9]+) dB/);
-            if (volumeMatch) {
+            if (volumeMatch && !resolved) {
+                resolved = true;
+                clearTimeout(timeout);
                 const volume = parseFloat(volumeMatch[1]);
                 log.debug(`📊 Volume at ${time.toFixed(2)}s: ${volume}dB`);
                 callback(null, volume);
             }
         })
         .on('error', (err) => {
-            log.error(`❌ Error getting volume at ${time.toFixed(2)}s:`, err.message);
-            callback(err);
+            if (!resolved) {
+                resolved = true;
+                clearTimeout(timeout);
+                log.error(`❌ Error getting volume at ${time.toFixed(2)}s:`, err.message);
+                callback(err);
+            }
         })
         .run();
 }
@@ -107,38 +132,65 @@ async function main() {
     const frameCount = Math.floor(audioDuration * FRAME_RATE);
     log.info(`🎞️  Total frames to generate: ${frameCount}`);
     
-    const framePromises = [];
+    // Process frames in batches to manage memory and improve logging
+    const startTime = Date.now();
+    const isLongClip = audioDuration > PERFORMANCE_CONFIG.LONG_CLIP_THRESHOLD;
+    const batchSize = isLongClip ? PERFORMANCE_CONFIG.BATCH_SIZE : Math.min(frameCount, 200);
     let processedFrames = 0;
 
-    for (let i = 0; i < frameCount; i++) {
-        const time = i / FRAME_RATE;
-        framePromises.push(
-            new Promise((resolve, reject) => {
-                getVolume(AUDIO_PATH, time, (err, volume) => {
-                    if (err) return reject(err);
-
-                    let mouthState = 'closed';
-                    if (volume > -30) {
-                        mouthState = 'tongue';
-                    } else if (volume > -40) {
-                        mouthState = 'open';
-                    }
-
-                    log.debug(`👄 Frame ${i}: ${mouthState} (volume: ${volume}dB)`);
-                    createFrame(mouthState, i).then(() => {
-                        processedFrames++;
-                        if (processedFrames % 10 === 0 || processedFrames === frameCount) {
-                            const progress = ((processedFrames / frameCount) * 100).toFixed(1);
-                            log.info(`📈 Progress: ${processedFrames}/${frameCount} frames (${progress}%)`);
-                        }
-                        resolve();
-                    }).catch(reject);
-                });
-            })
-        );
+    if (isLongClip) {
+        log.info(`⚡ Long clip detected (${audioDuration.toFixed(1)}s), using optimized batch processing`);
     }
 
-    await Promise.all(framePromises);
+    for (let batchStart = 0; batchStart < frameCount; batchStart += batchSize) {
+        const batchEnd = Math.min(batchStart + batchSize, frameCount);
+        const batchPromises = [];
+        const batchNum = Math.floor(batchStart/batchSize) + 1;
+        const totalBatches = Math.ceil(frameCount/batchSize);
+        
+        log.info(`🔄 Processing batch ${batchNum}/${totalBatches} (frames ${batchStart}-${batchEnd-1})`);
+
+        for (let i = batchStart; i < batchEnd; i++) {
+            const time = i / FRAME_RATE;
+            batchPromises.push(
+                new Promise((resolve, reject) => {
+                    getVolume(AUDIO_PATH, time, (err, volume) => {
+                        if (err) return reject(err);
+
+                        let mouthState = 'closed';
+                        if (volume > -30) {
+                            mouthState = 'tongue';
+                        } else if (volume > -40) {
+                            mouthState = 'open';
+                        }
+
+                        log.debug(`👄 Frame ${i}: ${mouthState} (volume: ${volume}dB)`);
+                        createFrame(mouthState, i).then(() => {
+                            processedFrames++;
+                            resolve();
+                        }).catch(reject);
+                    });
+                })
+            );
+        }
+
+        await Promise.all(batchPromises);
+        const progress = ((processedFrames / frameCount) * 100).toFixed(1);
+        const timeElapsed = (Date.now() - startTime) / 1000;
+        const avgTimePerFrame = timeElapsed / processedFrames;
+        const estimatedTotal = (avgTimePerFrame * frameCount);
+        const estimatedRemaining = estimatedTotal - timeElapsed;
+        
+        log.info(`📈 Batch ${batchNum}/${totalBatches} complete! Progress: ${processedFrames}/${frameCount} frames (${progress}%)`);
+        if (isLongClip) {
+            log.info(`⏰ Estimated time remaining: ${Math.round(estimatedRemaining)}s`);
+        }
+        
+        // Force garbage collection between batches for long clips
+        if (PERFORMANCE_CONFIG.ENABLE_GC && global.gc && isLongClip) {
+            global.gc();
+        }
+    }
     log.info('✅ All frames generated successfully!');
 
     log.info('🎥 Creating video from frames...');
